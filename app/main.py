@@ -4,23 +4,21 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.db.session import Base, engine
 
-# Import ALL models before create_all()
+# Import models BEFORE create_all()
 from app.models.user import User
 from app.models.volunteer import Volunteer
 
-# Import init admin
-from app.db.init_admin import create_default_admin
-
-# Create database tables
+# Create tables
 Base.metadata.create_all(bind=engine)
 
-# Create default admin automatically
+# Create default admin
+from app.db.init_admin import create_default_admin
 create_default_admin()
 
-# Routes
+# Import routers
+from app.api.routes.auth import router as auth_router
 from app.api.routes.volunteer import router as volunteer_router
 from app.api.routes.admin import router as admin_router
-from app.api.routes.auth import router as auth_router
 
 app = FastAPI(
     title="EX IGP Volunteer Registration API",
@@ -28,32 +26,41 @@ app = FastAPI(
 )
 
 # =========================
-# CORS CONFIGURATION
+# CORS
 # =========================
+origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://ex-igp-frontend-vaak.vercel.app",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Static files
+# =========================
+# STATIC FILES
+# =========================
 app.mount(
     "/uploads",
     StaticFiles(directory="uploads"),
     name="uploads"
 )
 
-# Routers
-app.include_router(volunteer_router)
+# =========================
+# ROUTERS
+# =========================
 app.include_router(auth_router)
+app.include_router(volunteer_router)
 app.include_router(admin_router)
 
-
+# =========================
+# ROOT
+# =========================
 @app.get("/")
 def root():
     return {
@@ -61,7 +68,9 @@ def root():
         "message": "EX IGP Volunteer Registration API Running"
     }
 
-
+# =========================
+# HEALTH CHECK
+# =========================
 @app.get("/health")
 def health_check():
     return {
