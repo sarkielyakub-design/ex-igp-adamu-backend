@@ -2,7 +2,8 @@ venv/
 .env
 __pycache__/
 *.pyc
-.DS_Store
-logfile
+*.pyo
+
 uploads/
-generated_cards/
+logfile
+.DS_Store
