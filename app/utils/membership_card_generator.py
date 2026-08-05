@@ -1,5 +1,6 @@
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
+from reportlab.lib.utils import ImageReader
 from datetime import datetime
 import os
 
@@ -23,200 +24,39 @@ def generate_membership_card(volunteer, qr_path):
     )
 
     # ==========================
-    # BACKGROUND
+    # BACKGROUND IMAGE
     # ==========================
 
-    c.setFillColorRGB(0.05, 0.23, 0.14)
-    c.rect(0, 0, WIDTH, HEIGHT, fill=1)
+    background = "assets/card_background.png"
 
-    # Gold Header
-
-    c.setFillColorRGB(0.83, 0.69, 0.22)
-    c.rect(0, 350, WIDTH, 50, fill=1)
-
-    # White Card Body
-
-    c.setFillColorRGB(1, 1, 1)
-    c.roundRect(
-        20,
-        20,
-        WIDTH - 40,
-        HEIGHT - 90,
-        15,
-        fill=1
-    )
+    if os.path.exists(background):
+        c.drawImage(
+            ImageReader(background),
+            0,
+            0,
+            width=WIDTH,
+            height=HEIGHT,
+            preserveAspectRatio=False,
+            mask="auto"
+        )
+    else:
+        c.setFillColorRGB(0.05, 0.23, 0.14)
+        c.rect(0, 0, WIDTH, HEIGHT, fill=1)
 
     # ==========================
-    # TITLE
+    # PASSPORT PHOTO
     # ==========================
 
-    c.setFillColor(colors.black)
-
-    c.setFont(
-        "Helvetica-Bold",
-        18
-    )
-
-    c.drawCentredString(
-        WIDTH / 2,
-        365,
-        "EX-IGP ADAMU YOUTH VOLUNTEERS"
-    )
-
-    c.setFont(
-        "Helvetica-Bold",
-        14
-    )
-
-    c.drawCentredString(
-        WIDTH / 2,
-        335,
-        "OFFICIAL MEMBERSHIP CARD"
-    )
-
-    # ==========================
-    # PASSPORT
-    # ==========================
-
-    if (
-        volunteer.passport
-        and
-        os.path.exists(volunteer.passport)
-    ):
+    if volunteer.passport and os.path.exists(volunteer.passport):
         c.drawImage(
             volunteer.passport,
-            40,
-            120,
-            width=130,
-            height=150,
+            45,
+            115,
+            width=120,
+            height=145,
             preserveAspectRatio=True,
             mask="auto"
         )
-
-    # ==========================
-    # DETAILS
-    # ==========================
-
-    c.setFillColor(colors.black)
-
-    c.setFont(
-        "Helvetica-Bold",
-        10
-    )
-
-    details_x = 200
-
-    c.drawString(
-        details_x,
-        280,
-        "Membership No:"
-    )
-
-    c.drawString(
-        details_x,
-        250,
-        "Full Name:"
-    )
-
-    c.drawString(
-        details_x,
-        220,
-        "Gender:"
-    )
-
-    c.drawString(
-        details_x,
-        190,
-        "LGA:"
-    )
-
-    c.drawString(
-        details_x,
-        160,
-        "Ward:"
-    )
-
-    c.drawString(
-        details_x,
-        130,
-        "Unit:"
-    )
-
-    c.drawString(
-        details_x,
-        100,
-        "Joined:"
-    )
-
-    c.setFont(
-        "Helvetica",
-        10
-    )
-
-    c.drawString(
-        310,
-        280,
-        volunteer.registration_no or ""
-    )
-
-    c.drawString(
-        310,
-        250,
-        volunteer.name or ""
-    )
-
-    c.drawString(
-        310,
-        220,
-        volunteer.gender or ""
-    )
-
-    c.drawString(
-        310,
-        190,
-        volunteer.lga or ""
-    )
-
-    c.drawString(
-        310,
-        160,
-        volunteer.ward or ""
-    )
-
-    c.drawString(
-        310,
-        130,
-        volunteer.unit or ""
-    )
-
-    c.drawString(
-        310,
-        100,
-        datetime.now().strftime(
-            "%d %B %Y"
-        )
-    )
-
-    # ==========================
-    # STATUS
-    # ==========================
-
-    c.setFillColorRGB(
-        0,
-        0.5,
-        0
-    )
-
-    c.setFont(
-        "Helvetica-Bold",
-        14
-    )
-
-    c.drawString(
-        200,
-        60,
-        "STATUS: ACTIVE"
-    )
 
     # ==========================
     # QR CODE
@@ -226,12 +66,57 @@ def generate_membership_card(volunteer, qr_path):
         c.drawImage(
             qr_path,
             500,
-            60,
-            width=90,
-            height=90,
+            65,
+            width=85,
+            height=85,
             preserveAspectRatio=True,
             mask="auto"
         )
+
+    # ==========================
+    # DETAILS
+    # ==========================
+
+    details_x = 205
+
+    c.setFillColor(colors.black)
+
+    c.setFont("Helvetica-Bold", 10)
+
+    c.drawString(details_x, 285, "Membership No:")
+    c.drawString(details_x, 255, "Full Name:")
+    c.drawString(details_x, 225, "Gender:")
+    c.drawString(details_x, 195, "LGA:")
+    c.drawString(details_x, 165, "Ward:")
+    c.drawString(details_x, 135, "Unit:")
+    c.drawString(details_x, 105, "Joined:")
+
+    c.setFont("Helvetica", 10)
+
+    c.drawString(315, 285, volunteer.registration_no or "")
+    c.drawString(315, 255, volunteer.name or "")
+    c.drawString(315, 225, volunteer.gender or "")
+    c.drawString(315, 195, volunteer.lga or "")
+    c.drawString(315, 165, volunteer.ward or "")
+    c.drawString(315, 135, volunteer.unit or "")
+    c.drawString(
+        315,
+        105,
+        datetime.now().strftime("%d %B %Y")
+    )
+
+    # ==========================
+    # STATUS
+    # ==========================
+
+    c.setFillColor(colors.green)
+    c.setFont("Helvetica-Bold", 16)
+
+    c.drawString(
+        205,
+        70,
+        "STATUS: ACTIVE"
+    )
 
     # ==========================
     # FOOTER
@@ -246,7 +131,7 @@ def generate_membership_card(volunteer, qr_path):
 
     c.drawCentredString(
         WIDTH / 2,
-        35,
+        30,
         "Official Membership Card"
     )
 
