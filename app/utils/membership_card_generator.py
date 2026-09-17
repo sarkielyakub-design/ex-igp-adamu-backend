@@ -28,13 +28,15 @@ ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
 def resolve_upload_path(path: str | Path | None) -> Path | None:
     """
-    Resolve a stored upload path to the real filesystem path.
+    Resolve the actual upload file on disk.
 
-    Supports:
+    The application has used both:
       /app/app/uploads/...
-      /uploads/...
+      /app/uploads/...
       uploads/...
-      bare filenames
+      /uploads/...
+    over its previous deployments, so we check the exact supplied
+    path first and then the known application/project upload roots.
     """
 
     if not path:
@@ -45,68 +47,88 @@ def resolve_upload_path(path: str | Path | None) -> Path | None:
     if not value:
         return None
 
-    candidate = Path(value)
+    supplied = Path(value)
 
-    if candidate.is_absolute():
-        if candidate.exists():
-            return candidate
+    # 1. Exact absolute path.
+    if supplied.is_absolute() and supplied.exists():
+        return supplied
 
-        # Recover files from legacy absolute paths by filename.
-        name = candidate.name
-        if name:
-            for directory in (
-                UPLOADS_DIR / "passports",
-                UPLOADS_DIR / "qr",
-                UPLOADS_DIR / "cards",
-            ):
-                recovered = directory / name
-                if recovered.exists():
-                    return recovered
+    # Filename is useful for recovering files saved by an older version.
+    filename = supplied.name
 
-        return candidate
-
+    # 2. Convert web/database paths to relative upload paths.
     if value.startswith("/uploads/"):
-        candidate = APP_DIR / value.lstrip("/")
+        relative = Path(value.lstrip("/"))
     elif value.startswith("uploads/"):
-        candidate = APP_DIR / value
+        relative = Path(value)
     else:
-        candidate = APP_DIR / value
+        relative = None
 
-    if candidate.exists():
-        return candidate
+    # 3. Check all realistic roots used by this project.
+    roots = (
+        APP_DIR,
+        APP_DIR.parent,
+        Path.cwd(),
+        Path.cwd() / "app",
+    )
 
-    # If the database contains only a filename, search the
-    # appropriate upload folders.
-    name = Path(value).name
+    if relative:
+        for root in roots:
+            candidate = root / relative
+            if candidate.exists():
+                return candidate
 
-    for directory in (
-        UPLOADS_DIR / "passports",
-        UPLOADS_DIR / "qr",
-        UPLOADS_DIR / "cards",
-    ):
-        recovered = directory / name
-        if recovered.exists():
-            return recovered
+    # 4. Exact legacy absolute path may point at an old project root.
+    if supplied.is_absolute():
+        for root in roots:
+            candidate = root / "uploads" / filename
+            if candidate.exists():
+                return candidate
 
-    return candidate
+    # 5. Bare filename / legacy DB value.
+    if filename:
+        for root in roots:
+            for folder in ("passports", "qr", "cards"):
+                candidate = root / "uploads" / folder / filename
+                if candidate.exists():
+                    return candidate
+
+    return supplied if supplied.is_absolute() else APP_DIR / relative if relative else APP_DIR / supplied
 
 
-def find_existing_upload(path: str | Path | None, folder: str) -> Path | None:
-    """Resolve an upload by full path or filename inside a known folder."""
+def find_existing_upload(
+    path: str | Path | None,
+    folder: str,
+) -> Path | None:
+    """Find a file specifically inside the requested upload folder."""
+
+    if not path:
+        return None
 
     resolved = resolve_upload_path(path)
     if resolved and resolved.exists():
         return resolved
 
-    if not path:
+    filename = Path(
+        str(path).strip().replace("\\", "/")
+    ).name
+
+    if not filename:
         return None
 
-    name = Path(str(path).replace("\\", "/")).name
-    if not name:
-        return None
+    roots = (
+        APP_DIR,
+        APP_DIR.parent,
+        Path.cwd(),
+        Path.cwd() / "app",
+    )
 
-    candidate = UPLOADS_DIR / folder / name
-    return candidate if candidate.exists() else None
+    for root in roots:
+        candidate = root / "uploads" / folder / filename
+        if candidate.exists():
+            return candidate
+
+    return None
 
 
 def draw_cropped_image(
@@ -410,6 +432,12 @@ def generate_membership_card(
         "passports",
     )
 
+    print(
+        "Card passport: "
+        f"stored={getattr(volunteer, 'passport', None)!r}, "
+        f"resolved={passport_path}"
+    )
+
     if passport_path:
         draw_cropped_image(
             c,
@@ -560,6 +588,12 @@ def generate_membership_card(
     qr_file = find_existing_upload(
         qr_path,
         "qr",
+    )
+
+    print(
+        "Card QR: "
+        f"stored={qr_path!r}, "
+        f"resolved={qr_file}"
     )
 
     if qr_file:
