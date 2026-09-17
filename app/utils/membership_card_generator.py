@@ -15,8 +15,11 @@ from reportlab.pdfgen import canvas
 APP_DIR = Path(__file__).resolve().parents[1]
 UPLOADS_DIR = APP_DIR / "uploads"
 CARD_DIR = UPLOADS_DIR / "cards"
+ASSETS_DIR = APP_DIR / "assets"
+LOGO_PATH = ASSETS_DIR / "ex_igp_adamu_logo.png"
 
 CARD_DIR.mkdir(parents=True, exist_ok=True)
+ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ============================================================
@@ -86,6 +89,24 @@ def resolve_upload_path(path: str | Path | None) -> Path | None:
             return recovered
 
     return candidate
+
+
+def find_existing_upload(path: str | Path | None, folder: str) -> Path | None:
+    """Resolve an upload by full path or filename inside a known folder."""
+
+    resolved = resolve_upload_path(path)
+    if resolved and resolved.exists():
+        return resolved
+
+    if not path:
+        return None
+
+    name = Path(str(path).replace("\\", "/")).name
+    if not name:
+        return None
+
+    candidate = UPLOADS_DIR / folder / name
+    return candidate if candidate.exists() else None
 
 
 def draw_cropped_image(
@@ -283,24 +304,30 @@ def generate_membership_card(
     )
 
     # ========================================================
-    # ORGANISATION MARK
+    # OFFICIAL EX-IGP ADAMU LOGO
     # ========================================================
 
-    logo_x = 48
-    logo_y = HEIGHT - 54
+    logo_x = 22
+    logo_y = HEIGHT - 95
+    logo_w = 125
+    logo_h = 100
 
-    c.setFillColor(GOLD)
-    c.circle(logo_x, logo_y, 30, stroke=0, fill=1)
-
-    c.setFillColor(DARK_GREEN)
-    c.circle(logo_x, logo_y, 25, stroke=0, fill=1)
-
-    c.setFillColor(WHITE)
-    c.setFont("Helvetica-Bold", 11)
-    c.drawCentredString(logo_x, logo_y + 5, "EX")
-
-    c.setFont("Helvetica-Bold", 7)
-    c.drawCentredString(logo_x, logo_y - 7, "IGP")
+    if LOGO_PATH.exists():
+        try:
+            c.drawImage(
+                ImageReader(str(LOGO_PATH)),
+                logo_x,
+                logo_y,
+                width=logo_w,
+                height=logo_h,
+                preserveAspectRatio=True,
+                anchor="sw",
+                mask="auto",
+            )
+        except Exception as exc:
+            print(f"Logo render error: {exc}")
+    else:
+        print(f"WARNING: Official logo not found: {LOGO_PATH}")
 
     # ========================================================
     # HEADER TITLE
@@ -308,16 +335,16 @@ def generate_membership_card(
 
     c.setFillColor(WHITE)
     c.setFont("Helvetica-Bold", 22)
-    c.drawString(92, HEIGHT - 45, "EX-IGP ADAMU")
+    c.drawString(165, HEIGHT - 45, "EX-IGP ADAMU")
 
     c.setFillColor(GOLD)
     c.setFont("Helvetica-Bold", 17)
-    c.drawString(92, HEIGHT - 68, "YOUTH VOLUNTEER")
+    c.drawString(165, HEIGHT - 68, "YOUTH VOLUNTEER")
 
     c.setFillColor(WHITE)
     c.setFont("Helvetica", 7.5)
     c.drawString(
-        93, HEIGHT - 88,
+        166, HEIGHT - 88,
         "VOLUNTEER MEMBERSHIP CARD"
     )
 
@@ -378,11 +405,12 @@ def generate_membership_card(
         10, stroke=0, fill=1
     )
 
-    passport_path = resolve_upload_path(
-        getattr(volunteer, "passport", None)
+    passport_path = find_existing_upload(
+        getattr(volunteer, "passport", None),
+        "passports",
     )
 
-    if passport_path and passport_path.exists():
+    if passport_path:
         draw_cropped_image(
             c,
             passport_path,
@@ -529,9 +557,12 @@ def generate_membership_card(
         8, stroke=1, fill=0
     )
 
-    qr_file = resolve_upload_path(qr_path)
+    qr_file = find_existing_upload(
+        qr_path,
+        "qr",
+    )
 
-    if qr_file and qr_file.exists():
+    if qr_file:
         c.drawImage(
             ImageReader(str(qr_file)),
             qr_x, qr_y,
