@@ -24,24 +24,68 @@ CARD_DIR.mkdir(parents=True, exist_ok=True)
 # ============================================================
 
 def resolve_upload_path(path: str | Path | None) -> Path | None:
-    """Resolve absolute, uploads-relative, or /uploads/ paths."""
+    """
+    Resolve a stored upload path to the real filesystem path.
+
+    Supports:
+      /app/app/uploads/...
+      /uploads/...
+      uploads/...
+      bare filenames
+    """
 
     if not path:
         return None
 
-    value = str(path).replace("\\", "/")
+    value = str(path).strip().replace("\\", "/")
+
+    if not value:
+        return None
+
     candidate = Path(value)
 
     if candidate.is_absolute():
+        if candidate.exists():
+            return candidate
+
+        # Recover files from legacy absolute paths by filename.
+        name = candidate.name
+        if name:
+            for directory in (
+                UPLOADS_DIR / "passports",
+                UPLOADS_DIR / "qr",
+                UPLOADS_DIR / "cards",
+            ):
+                recovered = directory / name
+                if recovered.exists():
+                    return recovered
+
         return candidate
 
     if value.startswith("/uploads/"):
-        return APP_DIR / value.lstrip("/")
+        candidate = APP_DIR / value.lstrip("/")
+    elif value.startswith("uploads/"):
+        candidate = APP_DIR / value
+    else:
+        candidate = APP_DIR / value
 
-    if value.startswith("uploads/"):
-        return APP_DIR / value
+    if candidate.exists():
+        return candidate
 
-    return APP_DIR / value
+    # If the database contains only a filename, search the
+    # appropriate upload folders.
+    name = Path(value).name
+
+    for directory in (
+        UPLOADS_DIR / "passports",
+        UPLOADS_DIR / "qr",
+        UPLOADS_DIR / "cards",
+    ):
+        recovered = directory / name
+        if recovered.exists():
+            return recovered
+
+    return candidate
 
 
 def draw_cropped_image(
@@ -180,6 +224,8 @@ def generate_membership_card(
         f"{registration_no}-membership-card.pdf"
     )
 
+    CARD_DIR.mkdir(parents=True, exist_ok=True)
+
     # ========================================================
     # CARD SIZE
     # ========================================================
@@ -266,7 +312,7 @@ def generate_membership_card(
 
     c.setFillColor(GOLD)
     c.setFont("Helvetica-Bold", 17)
-    c.drawString(92, HEIGHT - 68, "YOUTH VOLUNTEERS")
+    c.drawString(92, HEIGHT - 68, "YOUTH VOLUNTEER")
 
     c.setFillColor(WHITE)
     c.setFont("Helvetica", 7.5)
@@ -347,6 +393,12 @@ def generate_membership_card(
             8,
         )
     else:
+        print(
+            "WARNING: Passport not found. "
+            f"Stored value={getattr(volunteer, 'passport', None)!r}; "
+            f"resolved={passport_path}"
+        )
+
         c.setFillColor(colors.HexColor("#E5E7EB"))
         c.roundRect(
             photo_x, photo_y,
@@ -488,6 +540,12 @@ def generate_membership_card(
             preserveAspectRatio=True,
             anchor="c",
             mask="auto",
+        )
+    else:
+        print(
+            "WARNING: QR code not found. "
+            f"Stored value={qr_path!r}; "
+            f"resolved={qr_file}"
         )
 
     c.setFillColor(GREEN)
