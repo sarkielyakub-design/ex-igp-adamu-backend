@@ -105,18 +105,6 @@ def _upload_filesystem_path(path: str | Path | None) -> Path | None:
     # Absolute path already points to the file.
     candidate = Path(value)
     if candidate.is_absolute():
-        if candidate.exists():
-            return candidate
-
-        # Recover legacy absolute paths if an older deployment stored
-        # uploads in a different application directory.
-        filename = candidate.name
-        if filename:
-            for directory in (PASSPORTS_DIR, QR_DIR, CARDS_DIR):
-                recovered = directory / filename
-                if recovered.exists():
-                    return recovered
-
         return candidate
 
     # Stored application-relative path, e.g. uploads/cards/file.pdf.
