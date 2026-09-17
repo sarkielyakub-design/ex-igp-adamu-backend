@@ -23,6 +23,8 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 import os
+from pathlib import Path
+
 import qrcode
 
 from app.db.session import get_db
@@ -55,6 +57,95 @@ router = APIRouter(
 
 NASARAWA_STATE_CODE = "25"
 DEFAULT_REGISTRATION_TARGET = 30
+
+# ------------------------------------------------------------------
+# Filesystem / upload paths
+# volunteer.py lives at: app/api/routes/volunteer.py
+# Therefore parents[1] resolves to the FastAPI package directory:
+# /app/app on Railway.
+# ------------------------------------------------------------------
+APP_DIR = Path(__file__).resolve().parents[1]
+UPLOADS_DIR = APP_DIR / "uploads"
+
+PASSPORTS_DIR = UPLOADS_DIR / "passports"
+QR_DIR = UPLOADS_DIR / "qr"
+CARDS_DIR = UPLOADS_DIR / "cards"
+
+for directory in (PASSPORTS_DIR, QR_DIR, CARDS_DIR):
+    directory.mkdir(parents=True, exist_ok=True)
+
+
+def _web_upload_url(path: str | Path | None) -> str | None:
+    """Convert an upload filesystem path to a frontend /uploads URL."""
+    if not path:
+        return None
+
+    value = str(path).replace("\\", "/")
+    marker = "/uploads/"
+
+    if marker in value:
+        return value[value.index(marker):]
+
+    if value.startswith("uploads/"):
+        return f"/{value}"
+
+    if value.startswith("/uploads/"):
+        return value
+
+    return value
+
+
+def _upload_filesystem_path(path: str | Path | None) -> Path | None:
+    """Resolve stored upload paths to an absolute filesystem path."""
+    if not path:
+        return None
+
+    value = str(path).replace("\\", "/")
+
+    # Absolute path already points to the file.
+    candidate = Path(value)
+    if candidate.is_absolute():
+        if candidate.exists():
+            return candidate
+
+        # Recover legacy absolute paths if an older deployment stored
+        # uploads in a different application directory.
+        filename = candidate.name
+        if filename:
+            for directory in (PASSPORTS_DIR, QR_DIR, CARDS_DIR):
+                recovered = directory / filename
+                if recovered.exists():
+                    return recovered
+
+        return candidate
+
+    # Stored application-relative path, e.g. uploads/cards/file.pdf.
+    if value.startswith("uploads/"):
+        return APP_DIR / value
+
+    # Stored web path, e.g. /uploads/cards/file.pdf.
+    if value.startswith("/uploads/"):
+        return APP_DIR / value.lstrip("/")
+
+    # Legacy relative upload path fallback.
+    return APP_DIR / value
+
+
+def _stored_upload_path(path: str | Path) -> str:
+    """Store upload paths in the database using a stable relative format."""
+    value = str(path).replace("\\", "/")
+    marker = "/uploads/"
+
+    if marker in value:
+        return "uploads/" + value.split(marker, 1)[1]
+
+    if value.startswith("/uploads/"):
+        return value.lstrip("/")
+
+    if value.startswith("uploads/"):
+        return value
+
+    return value
 
 
 # ============================================================
@@ -261,23 +352,12 @@ async def register(
         unit = polling_unit.pu_name
 
         # ====================================================
-        # CREATE UPLOAD DIRECTORIES
+        # ENSURE UPLOAD DIRECTORIES EXIST
         # ====================================================
 
-        os.makedirs(
-            "uploads/passports",
-            exist_ok=True,
-        )
-
-        os.makedirs(
-            "uploads/qr",
-            exist_ok=True,
-        )
-
-        os.makedirs(
-            "uploads/cards",
-            exist_ok=True,
-        )
+        PASSPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        QR_DIR.mkdir(parents=True, exist_ok=True)
+        CARDS_DIR.mkdir(parents=True, exist_ok=True)
 
         # ====================================================
         # GENERATE REGISTRATION NUMBER
@@ -313,9 +393,8 @@ async def register(
             f"{registration_no}.{ext}"
         )
 
-        passport_path = (
-            f"uploads/passports/{passport_filename}"
-        )
+        passport_fs_path = PASSPORTS_DIR / passport_filename
+        passport_path = _stored_upload_path(passport_fs_path)
 
         passport_content = await passport.read()
 
@@ -325,8 +404,7 @@ async def register(
                 detail="Uploaded passport file is empty",
             )
 
-        with open(
-            passport_path,
+        with passport_fs_path.open(
             "wb",
         ) as buffer:
             buffer.write(passport_content)
@@ -335,15 +413,11 @@ async def register(
         # GENERATE QR CODE
         # ====================================================
 
-        qr_path = (
-            f"uploads/qr/{registration_no}.png"
-        )
+        qr_fs_path = QR_DIR / f"{registration_no}.png"
+        qr_path = _stored_upload_path(qr_fs_path)
 
-        qr = qrcode.make(
-            registration_no
-        )
-
-        qr.save(qr_path)
+        qr = qrcode.make(registration_no)
+        qr.save(qr_fs_path)
 
         # ====================================================
         # CREATE VOLUNTEER
@@ -466,12 +540,11 @@ async def register(
         # GENERATE MEMBERSHIP CARD
         # ====================================================
 
-        membership_card_path = (
-            generate_membership_card(
-                volunteer,
-                qr_path,
-            )
+        membership_card_path = generate_membership_card(
+            volunteer,
+            str(qr_fs_path),
         )
+        membership_card_path = _stored_upload_path(membership_card_path)
 
         # ====================================================
         # SAVE CARD PATH
@@ -507,11 +580,11 @@ async def register(
             # Files
             # ------------------------------------------------
 
-            "passport": passport_path,
+            "passport": _web_upload_url(passport_path),
 
-            "qr_code": qr_path,
+            "qr_code": _web_upload_url(qr_path),
 
-            "id_card": membership_card_path,
+            "id_card": _web_upload_url(membership_card_path),
 
             # ------------------------------------------------
             # Location
@@ -599,11 +672,11 @@ async def register(
             qr_path,
             membership_card_path,
         ]:
+            resolved_path = _upload_filesystem_path(file_path)
 
-            if file_path and os.path.exists(file_path):
-
+            if resolved_path and resolved_path.exists():
                 try:
-                    os.remove(file_path)
+                    resolved_path.unlink()
                 except OSError:
                     pass
 
@@ -957,16 +1030,16 @@ def delete_volunteer(
     # REMOVE UPLOADED FILES
     # ========================================================
 
-    for file_path in [
+    for file_path in (
         volunteer.passport,
         volunteer.qr_code,
         volunteer.id_card,
-    ]:
+    ):
+        resolved_path = _upload_filesystem_path(file_path)
 
-        if file_path and os.path.exists(file_path):
-
+        if resolved_path and resolved_path.exists():
             try:
-                os.remove(file_path)
+                resolved_path.unlink()
             except OSError:
                 pass
 
@@ -1098,20 +1171,16 @@ def download_membership_card(
             ),
         )
 
-    if not os.path.exists(
-        volunteer.id_card
-    ):
+    card_path = _upload_filesystem_path(volunteer.id_card)
 
+    if not card_path or not card_path.exists():
         raise HTTPException(
             status_code=404,
-            detail=(
-                "Membership card file not found"
-            ),
+            detail="Membership card file not found",
         )
 
     return FileResponse(
-
-        volunteer.id_card,
+        str(card_path),
 
         media_type="application/pdf",
 
@@ -1138,14 +1207,8 @@ def export_excel(
         .all()
     )
 
-    os.makedirs(
-        "uploads",
-        exist_ok=True,
-    )
-
-    path = (
-        "uploads/volunteers.xlsx"
-    )
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    path = UPLOADS_DIR / "volunteers.xlsx"
 
     wb = Workbook()
 
@@ -1216,9 +1279,7 @@ def export_excel(
     wb.save(path)
 
     return FileResponse(
-
-        path,
-
+        str(path),
         media_type=(
             "application/vnd.openxmlformats-"
             "officedocument.spreadsheetml.sheet"
@@ -1245,14 +1306,8 @@ def export_pdf(
         .all()
     )
 
-    os.makedirs(
-        "uploads",
-        exist_ok=True,
-    )
-
-    path = (
-        "uploads/volunteers.pdf"
-    )
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    path = UPLOADS_DIR / "volunteers.pdf"
 
     pdf = SimpleDocTemplate(path)
 
@@ -1334,9 +1389,7 @@ def export_pdf(
     pdf.build([table])
 
     return FileResponse(
-
-        path,
-
+        str(path),
         media_type="application/pdf",
 
         filename="volunteers.pdf",
