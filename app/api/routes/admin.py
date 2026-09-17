@@ -3,6 +3,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_
 from typing import Optional
+from pathlib import Path
 import os
 
 from app.core.dependencies import get_current_admin
@@ -10,6 +11,131 @@ from app.db.session import get_db
 from app.models.volunteer import Volunteer
 from app.models.polling_unit import PollingUnit
 from app.utils.excel_export import generate_volunteers_excel
+
+
+# ============================================================
+# MEDIA / FILE HELPERS
+# ============================================================
+
+APP_DIR = Path(__file__).resolve().parents[2]
+UPLOADS_DIR = APP_DIR / "uploads"
+
+# Prefer the Railway public domain when available. The fallback keeps
+# existing deployments working, while PUBLIC_BASE_URL can override it.
+_PUBLIC_BASE_URL = (
+    os.getenv("PUBLIC_BASE_URL")
+    or os.getenv("BACKEND_PUBLIC_URL")
+    or os.getenv("RAILWAY_PUBLIC_DOMAIN")
+    or "https://ex-igp-adamu-backend-production.up.railway.app"
+).strip().rstrip("/")
+
+if _PUBLIC_BASE_URL and not _PUBLIC_BASE_URL.startswith(("http://", "https://")):
+    _PUBLIC_BASE_URL = f"https://{_PUBLIC_BASE_URL}"
+
+
+def _resolve_upload_path(value) -> Optional[Path]:
+    """Resolve old/new stored upload values to the real filesystem path."""
+    if not value:
+        return None
+
+    raw = str(value).strip()
+    if not raw:
+        return None
+
+    candidates = []
+    raw_path = Path(raw)
+
+    if raw_path.is_absolute():
+        candidates.append(raw_path)
+
+    cleaned = raw.replace("\\", "/").lstrip("/")
+
+    if cleaned.startswith("uploads/"):
+        candidates.append(APP_DIR / cleaned)
+    else:
+        candidates.append(UPLOADS_DIR / cleaned)
+        candidates.append(APP_DIR / cleaned)
+
+    # Legacy values may contain /app/app/uploads/... or /app/uploads/...
+    if "/uploads/" in cleaned:
+        suffix = cleaned.split("/uploads/", 1)[1]
+        candidates.append(UPLOADS_DIR / suffix)
+
+    seen = set()
+    for candidate in candidates:
+        candidate = candidate.resolve(strict=False)
+        if str(candidate) in seen:
+            continue
+        seen.add(str(candidate))
+        if candidate.exists() and candidate.is_file():
+            return candidate
+
+    # Return the most useful deterministic candidate for callers that need
+    # to create a missing file.
+    if cleaned.startswith("uploads/"):
+        return (APP_DIR / cleaned).resolve(strict=False)
+    return (UPLOADS_DIR / cleaned).resolve(strict=False)
+
+
+def _web_upload_url(value) -> Optional[str]:
+    """Convert stored upload paths into browser-safe /uploads URLs."""
+    if not value:
+        return None
+
+    raw = str(value).strip().replace("\\", "/")
+    if not raw:
+        return None
+
+    marker = "/uploads/"
+    if marker in raw:
+        relative = raw.split(marker, 1)[1].lstrip("/")
+    else:
+        relative = raw.lstrip("/")
+        if relative.startswith("uploads/"):
+            relative = relative[len("uploads/"): ]
+
+    url = f"/uploads/{relative}"
+    return f"{_PUBLIC_BASE_URL}{url}" if _PUBLIC_BASE_URL else url
+
+
+def _volunteer_media(volunteer):
+    """Return consistent media URLs without exposing filesystem paths."""
+    return {
+        "passport": _web_upload_url(getattr(volunteer, "passport", None)),
+        "passport_url": _web_upload_url(getattr(volunteer, "passport", None)),
+        "qr_code": _web_upload_url(getattr(volunteer, "qr_code", None)),
+        "qr_code_url": _web_upload_url(getattr(volunteer, "qr_code", None)),
+        "id_card": _web_upload_url(getattr(volunteer, "id_card", None)),
+        "id_card_url": _web_upload_url(getattr(volunteer, "id_card", None)),
+    }
+
+
+def _serialize_volunteer(volunteer):
+    """Serialize a Volunteer ORM object with safe media URLs."""
+    data = {}
+    for column in volunteer.__mapper__.column_attrs:
+        key = column.key
+        data[key] = getattr(volunteer, key)
+
+    data.update(_volunteer_media(volunteer))
+
+    registration_no = getattr(volunteer, "registration_no", None)
+    if registration_no:
+        data["membership_card_download_url"] = (
+            f"{_PUBLIC_BASE_URL}/api/admin/membership-card/{registration_no}"
+            if _PUBLIC_BASE_URL
+            else f"/api/admin/membership-card/{registration_no}"
+        )
+        data["card_download_url"] = data["membership_card_download_url"]
+    else:
+        data["membership_card_download_url"] = None
+        data["card_download_url"] = None
+
+    return data
+
+
+def _serialize_volunteers(volunteers):
+    return [_serialize_volunteer(v) for v in volunteers]
 
 
 router = APIRouter(
@@ -489,7 +615,7 @@ def polling_unit_details(
 
         "volunteers": {
             "count": len(volunteers),
-            "data": volunteers,
+            "data": _serialize_volunteers(volunteers),
         },
     }
 
@@ -714,7 +840,7 @@ def all_volunteers(
 
     return {
         "count": len(volunteers),
-        "data": volunteers,
+        "data": _serialize_volunteers(volunteers),
     }
 
 
@@ -733,7 +859,7 @@ def recent_volunteers(
         .all()
     )
 
-    return volunteers
+    return _serialize_volunteers(volunteers)
 
 
 # ============================================================
@@ -770,7 +896,7 @@ def volunteer_details(
         )
 
     return {
-        "volunteer": volunteer,
+        "volunteer": _serialize_volunteer(volunteer),
 
         "polling_unit": (
             {
@@ -856,15 +982,16 @@ def delete_volunteer(
             .first()
         )
 
-    # Remove uploaded files
-    for file_path in [
+    # Remove uploaded files from the actual uploads directory.
+    for stored_path in [
         volunteer.passport,
         volunteer.qr_code,
         volunteer.id_card,
     ]:
-        if file_path and os.path.exists(file_path):
+        file_path = _resolve_upload_path(stored_path)
+        if file_path and file_path.exists():
             try:
-                os.remove(file_path)
+                file_path.unlink()
             except OSError:
                 pass
 
@@ -962,7 +1089,7 @@ def search_volunteers(
         .all()
     )
 
-    return volunteers
+    return _serialize_volunteers(volunteers)
 
 
 # ============================================================
@@ -974,12 +1101,10 @@ def download_membership_card(
     registration_no: str,
     db: Session = Depends(get_db),
 ):
+    """Download a volunteer membership card, rebuilding it if missing."""
     volunteer = (
         db.query(Volunteer)
-        .filter(
-            Volunteer.registration_no
-            == registration_no
-        )
+        .filter(Volunteer.registration_no == registration_no)
         .first()
     )
 
@@ -989,26 +1114,78 @@ def download_membership_card(
             detail="Volunteer not found",
         )
 
-    if not volunteer.id_card:
-        raise HTTPException(
-            status_code=404,
-            detail="Membership card not found",
-        )
+    card_path = _resolve_upload_path(volunteer.id_card)
 
-    if not os.path.exists(volunteer.id_card):
-        raise HTTPException(
-            status_code=404,
-            detail="Membership card file not found",
+    # If the DB points to an old/missing path, use the deterministic current
+    # card filename as a second lookup.
+    if not card_path or not card_path.exists():
+        fallback_card = UPLOADS_DIR / "cards" / (
+            f"{registration_no}-membership-card.pdf"
         )
+        if fallback_card.exists():
+            card_path = fallback_card
+
+    # Self-heal missing cards instead of returning a dead 404 link.
+    if not card_path or not card_path.exists():
+        try:
+            from app.utils.membership_card_generator import (
+                generate_membership_card,
+            )
+
+            qr_path = _resolve_upload_path(volunteer.qr_code)
+
+            if not qr_path or not qr_path.exists():
+                import qrcode
+
+                qr_dir = UPLOADS_DIR / "qr"
+                qr_dir.mkdir(parents=True, exist_ok=True)
+                qr_path = qr_dir / f"{registration_no}.png"
+                qr = qrcode.make(str(registration_no))
+                qr.save(qr_path)
+
+                volunteer.qr_code = _web_upload_url(qr_path)
+
+            generated_path = generate_membership_card(
+                volunteer,
+                qr_path,
+            )
+
+            card_path = _resolve_upload_path(generated_path)
+            if not card_path or not card_path.exists():
+                card_path = (
+                    UPLOADS_DIR
+                    / "cards"
+                    / f"{registration_no}-membership-card.pdf"
+                )
+
+            if not card_path.exists():
+                raise RuntimeError(
+                    "Membership card generator did not create the PDF file"
+                )
+
+            volunteer.id_card = _web_upload_url(card_path)
+            db.commit()
+
+        except HTTPException:
+            raise
+        except Exception as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Unable to generate membership card: {exc}",
+            )
 
     return FileResponse(
-        volunteer.id_card,
+        path=str(card_path),
         media_type="application/pdf",
-        filename=(
-            f"{registration_no}-membership-card.pdf"
-        ),
+        filename=f"{registration_no}-membership-card.pdf",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{registration_no}-membership-card.pdf"'
+            ),
+            "Cache-Control": "no-cache",
+        },
     )
-
 
 # ============================================================
 # CURRENT ADMIN
