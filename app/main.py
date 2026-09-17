@@ -1,8 +1,8 @@
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.db.session import Base, engine
 
@@ -11,22 +11,12 @@ from app.db.session import Base, engine
 # PROJECT PATHS
 # ============================================================
 
-# main.py:
-# /app/app/main.py
-#
-# APP_DIR:
-# /app/app
-#
-# This matches the location where your current upload generator
-# is creating:
-# /app/app/uploads/
-# ============================================================
-
 APP_DIR = Path(__file__).resolve().parent
-
 UPLOADS_DIR = APP_DIR / "uploads"
+
 CARDS_DIR = UPLOADS_DIR / "cards"
 PASSPORTS_DIR = UPLOADS_DIR / "passports"
+QR_DIR = UPLOADS_DIR / "qr"
 ASSETS_DIR = APP_DIR / "assets"
 
 
@@ -34,14 +24,18 @@ ASSETS_DIR = APP_DIR / "assets"
 # CREATE REQUIRED DIRECTORIES
 # ============================================================
 
-UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-CARDS_DIR.mkdir(parents=True, exist_ok=True)
-PASSPORTS_DIR.mkdir(parents=True, exist_ok=True)
-ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+for directory in (
+    UPLOADS_DIR,
+    CARDS_DIR,
+    PASSPORTS_DIR,
+    QR_DIR,
+    ASSETS_DIR,
+):
+    directory.mkdir(parents=True, exist_ok=True)
 
 
 # ============================================================
-# IMPORT MODELS BEFORE create_all()
+# IMPORT MODELS
 # ============================================================
 
 from app.models.user import User
@@ -50,14 +44,14 @@ from app.models.polling_unit import PollingUnit
 
 
 # ============================================================
-# CREATE DATABASE TABLES
+# DATABASE TABLES
 # ============================================================
 
 Base.metadata.create_all(bind=engine)
 
 
 # ============================================================
-# CREATE DEFAULT ADMIN
+# DEFAULT ADMIN
 # ============================================================
 
 from app.db.init_admin import create_default_admin
@@ -107,31 +101,6 @@ app.add_middleware(
 # ============================================================
 # STATIC FILES
 # ============================================================
-#
-# Files physically stored at:
-#
-# /app/app/uploads/
-#
-# are publicly available as:
-#
-# /uploads/
-#
-# Example:
-#
-# /app/app/uploads/passports/EIAYV-NS-000001.jpeg
-#
-# becomes:
-#
-# /uploads/passports/EIAYV-NS-000001.jpeg
-#
-# And:
-#
-# /app/app/uploads/cards/EIAYV-NS-000011-membership-card.pdf
-#
-# becomes:
-#
-# /uploads/cards/EIAYV-NS-000011-membership-card.pdf
-# ============================================================
 
 app.mount(
     "/uploads",
@@ -144,16 +113,9 @@ app.mount(
 # ROUTERS
 # ============================================================
 
-# Authentication
 app.include_router(auth_router)
-
-# Public volunteer registration
 app.include_router(volunteer_router)
-
-# Public polling-unit lookup
 app.include_router(polling_units_router)
-
-# Protected admin dashboard/API
 app.include_router(admin_router)
 
 
