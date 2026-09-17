@@ -66,7 +66,7 @@ DEFAULT_REGISTRATION_TARGET = 30
 # Therefore parents[1] resolves to the FastAPI package directory:
 # /app/app on Railway.
 # ------------------------------------------------------------------
-APP_DIR = Path(__file__).resolve().parents[1]
+APP_DIR = Path(__file__).resolve().parents[2]
 UPLOADS_DIR = APP_DIR / "uploads"
 
 PASSPORTS_DIR = UPLOADS_DIR / "passports"
@@ -104,9 +104,14 @@ def _upload_filesystem_path(path: str | Path | None) -> Path | None:
 
     value = str(path).replace("\\", "/")
 
-    # Absolute path already points to the file.
+    # Absolute path.
     candidate = Path(value)
     if candidate.is_absolute():
+        # Repair legacy paths such as:
+        # /app/app/api/uploads/qr/file.png
+        if "/api/uploads/" in value:
+            suffix = value.split("/api/uploads/", 1)[1]
+            return UPLOADS_DIR / suffix
         return candidate
 
     # Stored application-relative path, e.g. uploads/cards/file.pdf.
@@ -232,6 +237,7 @@ async def register(
     passport_path = None
     qr_path = None
     membership_card_path = None
+    registration_no = None
 
     try:
 
@@ -434,6 +440,10 @@ async def register(
         with passport_fs_path.open("wb") as buffer:
             buffer.write(passport_content)
 
+        print(
+            f"Passport saved: {passport_fs_path}"
+        )
+
         if not passport_fs_path.exists() or passport_fs_path.stat().st_size == 0:
             raise RuntimeError("Passport image could not be saved.")
 
@@ -446,6 +456,10 @@ async def register(
 
         qr = qrcode.make(registration_no)
         qr.save(str(qr_fs_path))
+
+        print(
+            f"QR saved: {qr_fs_path}"
+        )
 
         if not qr_fs_path.exists() or qr_fs_path.stat().st_size == 0:
             raise RuntimeError("QR code could not be generated.")
@@ -583,44 +597,63 @@ async def register(
                 "Membership card generator returned no file."
             )
 
-        membership_card_path = _stored_upload_path(
+        # Normalize the generator's returned path.
+        generated_value = str(
             membership_card_generated_path
-        )
+        ).replace("\\", "/")
 
-        card_fs_path = _upload_filesystem_path(
-            membership_card_path
-        )
+        generated_candidate = Path(generated_value)
 
-        # Some generator versions return a path that is not normalized
-        # exactly as expected. Fall back to the deterministic card path.
-        if not card_fs_path or not card_fs_path.exists():
-            if expected_card_fs_path.exists():
-                card_fs_path = expected_card_fs_path
-                membership_card_path = _stored_upload_path(
-                    expected_card_fs_path
+        if generated_candidate.is_absolute():
+            if "/api/uploads/" in generated_value:
+                card_fs_path = (
+                    UPLOADS_DIR
+                    / generated_value.split(
+                        "/api/uploads/",
+                        1,
+                    )[1]
                 )
             else:
+                card_fs_path = generated_candidate
+
+        elif generated_value.startswith("uploads/"):
+            card_fs_path = APP_DIR / generated_value
+
+        elif generated_value.startswith("/uploads/"):
+            card_fs_path = (
+                APP_DIR
+                / generated_value.lstrip("/")
+            )
+
+        else:
+            card_fs_path = APP_DIR / generated_value
+
+        # The canonical card filename is the final fallback.
+        if not card_fs_path.exists():
+            if expected_card_fs_path.exists():
+                card_fs_path = expected_card_fs_path
+            else:
                 raise RuntimeError(
-                    "Membership card was generated but the PDF file "
-                    "could not be found."
+                    "Membership card was generated but the PDF "
+                    f"file could not be found. Expected: "
+                    f"{expected_card_fs_path}; generator returned: "
+                    f"{membership_card_generated_path}"
                 )
 
-        if card_fs_path.stat().st_size == 0:
-            raise RuntimeError("Membership card PDF was generated empty.")
+        if card_fs_path.stat().st_size <= 0:
+            raise RuntimeError(
+                "Membership card PDF was generated empty."
+            )
+
+        membership_card_path = _stored_upload_path(
+            card_fs_path
+        )
+
+        print(
+            f"Membership card saved: {card_fs_path}"
+        )
 
         volunteer.id_card = membership_card_path
-
-        # ====================================================
-        # UPDATE POLLING UNIT COUNT
-        # ====================================================
-
-        new_count = registration_count + 1
-        polling_unit.registered_count = new_count
-
-        if new_count >= target:
-            polling_unit.status = "FULL"
-        else:
-            polling_unit.status = "OPEN"
 
         # ====================================================
         # FINAL FILE VERIFICATION
@@ -934,7 +967,10 @@ def statistics(
         db.query(
             func.coalesce(
                 func.sum(
-                    PollingUnit.registration_target
+                    func.coalesce(
+                        PollingUnit.registration_target,
+                        DEFAULT_REGISTRATION_TARGET,
+                    )
                 ),
                 0,
             )
@@ -1312,18 +1348,66 @@ def download_membership_card(
                 str(qr_fs),
             )
 
-            stored_path = _stored_upload_path(regenerated_path)
-            regenerated_fs = _upload_filesystem_path(stored_path)
+            if not regenerated_path:
+                raise RuntimeError(
+                    "Membership card generator returned no file."
+                )
 
-            if not regenerated_fs or not regenerated_fs.exists():
-                fallback = CARDS_DIR / f"{registration_no}-membership-card.pdf"
+            regenerated_value = str(
+                regenerated_path
+            ).replace("\\", "/")
+
+            regenerated_candidate = Path(
+                regenerated_value
+            )
+
+            if regenerated_candidate.is_absolute():
+                if "/api/uploads/" in regenerated_value:
+                    regenerated_fs = (
+                        UPLOADS_DIR
+                        / regenerated_value.split(
+                            "/api/uploads/",
+                            1,
+                        )[1]
+                    )
+                else:
+                    regenerated_fs = regenerated_candidate
+
+            elif regenerated_value.startswith("uploads/"):
+                regenerated_fs = APP_DIR / regenerated_value
+
+            elif regenerated_value.startswith("/uploads/"):
+                regenerated_fs = (
+                    APP_DIR
+                    / regenerated_value.lstrip("/")
+                )
+
+            else:
+                regenerated_fs = APP_DIR / regenerated_value
+
+            fallback = (
+                CARDS_DIR
+                / f"{registration_no}-membership-card.pdf"
+            )
+
+            if not regenerated_fs.exists():
                 if fallback.exists():
                     regenerated_fs = fallback
-                    stored_path = _stored_upload_path(fallback)
                 else:
                     raise RuntimeError(
-                        "Regenerated membership card file was not found."
+                        "Regenerated membership card file "
+                        f"was not found. Expected: {fallback}; "
+                        f"generator returned: {regenerated_path}"
                     )
+
+            if regenerated_fs.stat().st_size <= 0:
+                raise RuntimeError(
+                    "Regenerated membership card PDF is empty."
+                )
+
+            stored_path = _stored_upload_path(
+                regenerated_fs
+            )
 
             volunteer.id_card = stored_path
             db.commit()
