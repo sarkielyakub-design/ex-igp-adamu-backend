@@ -1,9 +1,9 @@
 venv/
-.env
+venv-linux/
 __pycache__/
 *.pyc
-*.pyo
-
-uploads/
-logfile
 .DS_Store
+._*
+.env
+*.xlsx
+uploads/
