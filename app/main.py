@@ -11,21 +11,12 @@ from app.db.session import Base, engine
 # PROJECT PATHS
 # ============================================================
 
-# main.py is located at:
-# /app/app/main.py
-#
-# Therefore:
-# APP_DIR = /app/app
-# UPLOADS_DIR = /app/app/uploads
-
 APP_DIR = Path(__file__).resolve().parent
-
 UPLOADS_DIR = APP_DIR / "uploads"
 
 CARDS_DIR = UPLOADS_DIR / "cards"
 PASSPORTS_DIR = UPLOADS_DIR / "passports"
 QR_DIR = UPLOADS_DIR / "qr"
-
 ASSETS_DIR = APP_DIR / "assets"
 
 
@@ -40,10 +31,7 @@ for directory in (
     QR_DIR,
     ASSETS_DIR,
 ):
-    directory.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    directory.mkdir(parents=True, exist_ok=True)
 
 
 # ============================================================
@@ -78,9 +66,7 @@ create_default_admin()
 from app.api.routes.auth import router as auth_router
 from app.api.routes.volunteer import router as volunteer_router
 from app.api.routes.admin import router as admin_router
-from app.api.routes.polling_units import (
-    router as polling_units_router,
-)
+from app.api.routes.polling_units import router as polling_units_router
 
 
 # ============================================================
@@ -99,51 +85,26 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
-
         "https://ex-igp-frontend.vercel.app",
         "https://ex-igp-frontend-vaak.vercel.app",
     ],
-
-    # Allow Vercel preview deployments as well.
     allow_origin_regex=r"https://.*\.vercel\.app",
-
     allow_credentials=True,
-
     allow_methods=["*"],
-
     allow_headers=["*"],
 )
 
 
 # ============================================================
-# STATIC UPLOAD FILES
+# STATIC FILES
 # ============================================================
-
-# Physical directory:
-#
-# /app/app/uploads/
-#
-# Public URL:
-#
-# https://your-backend-domain.com/uploads/
-#
-# Example:
-#
-# /app/app/uploads/passports/EIAYV-NS-000019.jpeg
-#
-# becomes:
-#
-# /uploads/passports/EIAYV-NS-000019.jpeg
 
 app.mount(
     "/uploads",
-    StaticFiles(
-        directory=str(UPLOADS_DIR),
-    ),
+    StaticFiles(directory=str(UPLOADS_DIR)),
     name="uploads",
 )
 
@@ -152,16 +113,9 @@ app.mount(
 # ROUTERS
 # ============================================================
 
-# Authentication
 app.include_router(auth_router)
-
-# Volunteer registration
 app.include_router(volunteer_router)
-
-# Polling unit lookup
 app.include_router(polling_units_router)
-
-# Admin API
 app.include_router(admin_router)
 
 
