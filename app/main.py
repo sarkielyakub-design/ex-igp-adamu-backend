@@ -10,20 +10,24 @@ from app.db.session import Base, engine
 # ============================================================
 # PROJECT PATHS
 # ============================================================
-# main.py is located at:
-#   /app/app/main.py
+
+# main.py:
+# /app/app/main.py
 #
-# parent      -> /app/app
-# parent.parent -> /app
+# APP_DIR:
+# /app/app
 #
-# Therefore BASE_DIR becomes the actual backend project root.
+# This matches the location where your current upload generator
+# is creating:
+# /app/app/uploads/
 # ============================================================
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+APP_DIR = Path(__file__).resolve().parent
 
-UPLOADS_DIR = BASE_DIR / "uploads"
+UPLOADS_DIR = APP_DIR / "uploads"
 CARDS_DIR = UPLOADS_DIR / "cards"
-ASSETS_DIR = BASE_DIR / "assets"
+PASSPORTS_DIR = UPLOADS_DIR / "passports"
+ASSETS_DIR = APP_DIR / "assets"
 
 
 # ============================================================
@@ -32,6 +36,7 @@ ASSETS_DIR = BASE_DIR / "assets"
 
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 CARDS_DIR.mkdir(parents=True, exist_ok=True)
+PASSPORTS_DIR.mkdir(parents=True, exist_ok=True)
 ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -103,16 +108,29 @@ app.add_middleware(
 # STATIC FILES
 # ============================================================
 #
-# Public URL:
+# Files physically stored at:
 #
-#   /uploads/cards/example.pdf
+# /app/app/uploads/
 #
-# Maps to:
+# are publicly available as:
 #
-#   /app/uploads/cards/example.pdf
+# /uploads/
 #
-# This must match the location where the membership-card
-# generator saves generated PDF files.
+# Example:
+#
+# /app/app/uploads/passports/EIAYV-NS-000001.jpeg
+#
+# becomes:
+#
+# /uploads/passports/EIAYV-NS-000001.jpeg
+#
+# And:
+#
+# /app/app/uploads/cards/EIAYV-NS-000011-membership-card.pdf
+#
+# becomes:
+#
+# /uploads/cards/EIAYV-NS-000011-membership-card.pdf
 # ============================================================
 
 app.mount(
