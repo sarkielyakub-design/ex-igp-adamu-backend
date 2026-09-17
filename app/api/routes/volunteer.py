@@ -23,9 +23,11 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 import os
+from io import BytesIO
 from pathlib import Path
 
 import qrcode
+from PIL import Image
 
 from app.db.session import get_db
 
@@ -134,6 +136,26 @@ def _stored_upload_path(path: str | Path) -> str:
         return value
 
     return value
+
+
+def _serialize_volunteer(volunteer):
+    """Return a JSON-safe volunteer payload with browser-safe upload URLs."""
+    data = {}
+
+    for attribute in volunteer.__mapper__.column_attrs:
+        key = attribute.key
+        value = getattr(volunteer, key)
+
+        if key in {"passport", "qr_code", "id_card"}:
+            value = _web_upload_url(value)
+
+        data[key] = value
+
+    return data
+
+
+def _serialize_volunteers(volunteers):
+    return [_serialize_volunteer(v) for v in volunteers]
 
 
 # ============================================================
@@ -354,12 +376,16 @@ async def register(
         registration_no = generate_registration_no(db)
 
         # ====================================================
-        # SAVE PASSPORT
+        # SAVE PASSPORT / VOLUNTEER PHOTO
         # ====================================================
 
-        original_filename = (
-            passport.filename or ""
-        )
+        original_filename = (passport.filename or "").strip()
+
+        if not original_filename:
+            raise HTTPException(
+                status_code=400,
+                detail="Passport image is required",
+            )
 
         ext = (
             original_filename.rsplit(".", 1)[-1].lower()
@@ -367,20 +393,18 @@ async def register(
             else "jpg"
         )
 
-        # Remove unexpected characters from extension.
-        ext = "".join(
-            character
-            for character in ext
-            if character.isalnum()
-        )
+        allowed_extensions = {"jpg", "jpeg", "png", "webp", "jfif"}
 
-        if not ext:
-            ext = "jpg"
+        if ext not in allowed_extensions:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Invalid passport image format. "
+                    "Allowed formats: JPG, JPEG, PNG, WEBP, JFIF."
+                ),
+            )
 
-        passport_filename = (
-            f"{registration_no}.{ext}"
-        )
-
+        passport_filename = f"{registration_no}.{ext}"
         passport_fs_path = PASSPORTS_DIR / passport_filename
         passport_path = _stored_upload_path(passport_fs_path)
 
@@ -389,13 +413,29 @@ async def register(
         if not passport_content:
             raise HTTPException(
                 status_code=400,
-                detail="Uploaded passport file is empty",
+                detail="Uploaded passport image is empty",
             )
 
-        with passport_fs_path.open(
-            "wb",
-        ) as buffer:
+        if len(passport_content) > 10 * 1024 * 1024:
+            raise HTTPException(
+                status_code=400,
+                detail="Passport image is too large. Maximum size is 10MB.",
+            )
+
+        try:
+            with Image.open(BytesIO(passport_content)) as image:
+                image.verify()
+        except Exception:
+            raise HTTPException(
+                status_code=400,
+                detail="The uploaded passport is not a valid image.",
+            )
+
+        with passport_fs_path.open("wb") as buffer:
             buffer.write(passport_content)
+
+        if not passport_fs_path.exists() or passport_fs_path.stat().st_size == 0:
+            raise RuntimeError("Passport image could not be saved.")
 
         # ====================================================
         # GENERATE QR CODE
@@ -405,7 +445,10 @@ async def register(
         qr_path = _stored_upload_path(qr_fs_path)
 
         qr = qrcode.make(registration_no)
-        qr.save(qr_fs_path)
+        qr.save(str(qr_fs_path))
+
+        if not qr_fs_path.exists() or qr_fs_path.stat().st_size == 0:
+            raise RuntimeError("QR code could not be generated.")
 
         # ====================================================
         # CREATE VOLUNTEER
@@ -517,32 +560,92 @@ async def register(
             polling_unit.status = "OPEN"
 
         # ====================================================
-        # COMMIT REGISTRATION
+        # GENERATE MEMBERSHIP CARD BEFORE DATABASE COMMIT
+        # ====================================================
+        #
+        # The volunteer is already flushed, so the card generator can
+        # read all volunteer fields and the uploaded photo. The actual
+        # filesystem paths are passed to the generator, while the DB
+        # stores stable relative paths.
         # ====================================================
 
-        db.commit()
+        expected_card_fs_path = (
+            CARDS_DIR / f"{registration_no}-membership-card.pdf"
+        )
 
-        db.refresh(volunteer)
-
-        # ====================================================
-        # GENERATE MEMBERSHIP CARD
-        # ====================================================
-
-        membership_card_path = generate_membership_card(
+        membership_card_generated_path = generate_membership_card(
             volunteer,
             str(qr_fs_path),
         )
-        membership_card_path = _stored_upload_path(membership_card_path)
 
-        # ====================================================
-        # SAVE CARD PATH
-        # ====================================================
+        if not membership_card_generated_path:
+            raise RuntimeError(
+                "Membership card generator returned no file."
+            )
 
-        volunteer.id_card = (
+        membership_card_path = _stored_upload_path(
+            membership_card_generated_path
+        )
+
+        card_fs_path = _upload_filesystem_path(
             membership_card_path
         )
 
+        # Some generator versions return a path that is not normalized
+        # exactly as expected. Fall back to the deterministic card path.
+        if not card_fs_path or not card_fs_path.exists():
+            if expected_card_fs_path.exists():
+                card_fs_path = expected_card_fs_path
+                membership_card_path = _stored_upload_path(
+                    expected_card_fs_path
+                )
+            else:
+                raise RuntimeError(
+                    "Membership card was generated but the PDF file "
+                    "could not be found."
+                )
+
+        if card_fs_path.stat().st_size == 0:
+            raise RuntimeError("Membership card PDF was generated empty.")
+
+        volunteer.id_card = membership_card_path
+
+        # ====================================================
+        # UPDATE POLLING UNIT COUNT
+        # ====================================================
+
+        new_count = registration_count + 1
+        polling_unit.registered_count = new_count
+
+        if new_count >= target:
+            polling_unit.status = "FULL"
+        else:
+            polling_unit.status = "OPEN"
+
+        # ====================================================
+        # FINAL FILE VERIFICATION
+        # ====================================================
+
+        for required_file, label in (
+            (passport_fs_path, "Passport image"),
+            (qr_fs_path, "QR code"),
+            (card_fs_path, "Membership card"),
+        ):
+            if not required_file.exists() or required_file.stat().st_size == 0:
+                raise RuntimeError(
+                    f"{label} could not be verified before registration commit."
+                )
+
+        # ====================================================
+        # SINGLE DATABASE COMMIT
+        # ====================================================
+        #
+        # Card generation happens before this commit. Therefore a failed
+        # card generation cannot leave behind a database registration.
+        # ====================================================
+
         db.commit()
+        db.refresh(volunteer)
 
         # ====================================================
         # RETURN REGISTRATION RESULT
@@ -555,6 +658,15 @@ async def register(
             "message": (
                 "Registration successful"
             ),
+
+            "notification": {
+                "type": "success",
+                "title": "Registration Successful",
+                "message": (
+                    f"{name} has been successfully registered "
+                    f"as a volunteer."
+                ),
+            },
 
             "registration_no": (
                 registration_no
@@ -655,11 +767,23 @@ async def register(
         # Clean up files created during a failed transaction.
         # ----------------------------------------------------
 
-        for file_path in [
+        cleanup_paths = [
             passport_path,
             qr_path,
             membership_card_path,
-        ]:
+        ]
+
+        # The card generator can create the deterministic card file before
+        # returning its path. Include it in cleanup if registration fails.
+        try:
+            if registration_no:
+                cleanup_paths.append(
+                    CARDS_DIR / f"{registration_no}-membership-card.pdf"
+                )
+        except Exception:
+            pass
+
+        for file_path in cleanup_paths:
             resolved_path = _upload_filesystem_path(file_path)
 
             if resolved_path and resolved_path.exists():
@@ -695,7 +819,7 @@ def get_all_volunteers(
 
     return {
         "count": len(volunteers),
-        "data": volunteers,
+        "data": _serialize_volunteers(volunteers),
     }
 
 
@@ -940,7 +1064,7 @@ def search_volunteer(
             detail="Volunteer not found",
         )
 
-    return volunteer
+    return _serialize_volunteer(volunteer)
 
 
 # ============================================================
@@ -968,7 +1092,7 @@ def get_volunteer(
             detail="Volunteer not found",
         )
 
-    return volunteer
+    return _serialize_volunteer(volunteer)
 
 
 # ============================================================
@@ -1144,37 +1268,95 @@ def download_membership_card(
     )
 
     if not volunteer:
-
         raise HTTPException(
             status_code=404,
             detail="Volunteer not found",
         )
 
-    if not volunteer.id_card:
+    card_path = (
+        _upload_filesystem_path(volunteer.id_card)
+        if volunteer.id_card
+        else None
+    )
 
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                "Membership card not found"
-            ),
-        )
+    # --------------------------------------------------------
+    # REGENERATE MISSING CARD FOR EXISTING VOLUNTEERS
+    # --------------------------------------------------------
+    if not card_path or not card_path.exists():
+        passport_fs = _upload_filesystem_path(volunteer.passport)
 
-    card_path = _upload_filesystem_path(volunteer.id_card)
+        if not passport_fs or not passport_fs.exists():
+            raise HTTPException(
+                status_code=404,
+                detail="Volunteer passport image file not found.",
+            )
+
+        qr_fs = _upload_filesystem_path(volunteer.qr_code)
+
+        if not qr_fs or not qr_fs.exists():
+            QR_DIR.mkdir(parents=True, exist_ok=True)
+            qr_fs = QR_DIR / f"{registration_no}.png"
+            try:
+                qr = qrcode.make(registration_no)
+                qr.save(str(qr_fs))
+            except Exception as exc:
+                db.rollback()
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Could not rebuild volunteer QR code: {exc}",
+                )
+
+        try:
+            regenerated_path = generate_membership_card(
+                volunteer,
+                str(qr_fs),
+            )
+
+            stored_path = _stored_upload_path(regenerated_path)
+            regenerated_fs = _upload_filesystem_path(stored_path)
+
+            if not regenerated_fs or not regenerated_fs.exists():
+                fallback = CARDS_DIR / f"{registration_no}-membership-card.pdf"
+                if fallback.exists():
+                    regenerated_fs = fallback
+                    stored_path = _stored_upload_path(fallback)
+                else:
+                    raise RuntimeError(
+                        "Regenerated membership card file was not found."
+                    )
+
+            volunteer.id_card = stored_path
+            db.commit()
+            db.refresh(volunteer)
+            card_path = regenerated_fs
+
+        except HTTPException:
+            raise
+        except Exception as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Membership card could not be generated. "
+                    f"{exc}"
+                ),
+            )
 
     if not card_path or not card_path.exists():
         raise HTTPException(
             status_code=404,
-            detail="Membership card file not found",
+            detail="Membership card file not found.",
         )
 
     return FileResponse(
         str(card_path),
-
         media_type="application/pdf",
-
-        filename=(
-            f"{registration_no}-membership-card.pdf"
-        ),
+        filename=f"{registration_no}-membership-card.pdf",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{registration_no}-membership-card.pdf"'
+            )
+        },
     )
 
 
